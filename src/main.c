@@ -67,11 +67,6 @@ int main(){
 
     rtos_queue_init(&q_date);
 
-    /*rtos_task_create(idle_task, 0); // Task-ul idle cu prioritate minima 0
-    rtos_task_create(task_low, 1);
-    rtos_task_create(task_med, 2);
-    rtos_task_create(task_high, 3);*/
-
     rtos_task_create(idle_task, 0); //prio minima
     rtos_task_create(task_producator, 1); //prio medie
     rtos_task_create(task_consumator, 2); //prio mare - va procesa mesajul imd
