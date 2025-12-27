@@ -6,20 +6,60 @@
 #include "rtos_config.h"
 
 // ----------------------------------------------
+// Hardware Definitions (registrii SCB pentru PendSV)
+// ----------------------------------------------
+#define SCB_ICSR   (*(volatile uint32_t *)0xE000ED04) // Interrupt Control and State Register
+#define SCB_ICSR_PENDSVSET (1UL << 28)                // bit-ul pentru a declansa PendSV
+
+// ----------------------------------------------
+// Task States
+// ----------------------------------------------
+typedef enum {
+    TASK_READY=0,      
+    TASK_BLOCKED_SEM,
+    TASK_BLOCKED_MUTEX
+} task_state_t;
+
+// ----------------------------------------------
 // Task Control Block
 // ----------------------------------------------
 typedef struct rtos_tcb{
     uint32_t *stack_ptr;    // pointer la varful stivei taskului
     uint32_t priority;      // prioritatea
     uint32_t delay_ticks;   // delay in ticks
+    task_state_t state;     // gestionarea stării
+    void *wait_obj;        // obiectul la care asteapta (semaforul)
     struct rtos_tcb *next;  // pt ready lists
 }rtos_tcb_t;
 
 // ----------------------------------------------
-// definitii Hardware (registrii SCB pentru PendSV)
+// Semafor Structure
 // ----------------------------------------------
-#define SCB_ICSR   (*(volatile uint32_t *)0xE000ED04) // Interrupt Control and State Register
-#define SCB_ICSR_PENDSVSET (1UL << 28)                // bit-ul pentru a declansa PendSV
+typedef struct {
+    volatile uint32_t count;         // 0 sau 1 pentru semafor binar
+    // Putem adăuga o listă de task-uri care așteaptă acest semafor anume
+} rtos_sem_t;
+
+// ----------------------------------------------
+// Mutex Structure
+// ----------------------------------------------
+typedef struct {
+    volatile uint32_t lock;      // 0 = liber, 1 = ocupat
+    rtos_tcb_t *owner;           // Task-ul care deține mutex-ul
+    uint32_t original_priority;  // Prioritatea reală a owner-ului (pentru restaurare)
+} rtos_mutex_t;
+
+// ----------------------------------------------
+// Message Queue Structure
+// ----------------------------------------------
+typedef struct {
+    uint32_t buffer[8]; 
+    uint32_t head; //unde scrie
+    uint32_t tail; //de unde citeste
+    rtos_sem_t sem_free_slots;  // numara locurile libere Initial 8
+    rtos_sem_t sem_available_msgs; // Initial 0
+    rtos_mutex_t lock;
+} rtos_queue_t;
 
 // ----------------------------------------------
 // API
@@ -32,5 +72,17 @@ void rtos_delay(uint32_t ticks);
 void rtos_tick_handler();
 uint32_t rtos_now();
 void rtos_yield();   //forteaza switch ul
+//semafor 
+void rtos_sem_init(rtos_sem_t *sem, uint32_t initial_count);
+void rtos_sem_wait(rtos_sem_t *sem);   // Funcție blocantă 
+void rtos_sem_signal(rtos_sem_t *sem); // Eliberează semaforul
+//mutex
+void rtos_mutex_init(rtos_mutex_t *mutex);
+void rtos_mutex_lock(rtos_mutex_t *mutex);
+void rtos_mutex_unlock(rtos_mutex_t *mutex);
+//coada de mesaje
+void rtos_queue_init(rtos_queue_t *q);
+void rtos_queue_send(rtos_queue_t *q, uint32_t msg);
+uint32_t rtos_queue_receive(rtos_queue_t *q);
 
 #endif

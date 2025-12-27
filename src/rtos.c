@@ -68,7 +68,8 @@ void rtos_scheduler_next() {
         rtos_tcb_t *search = start_task;
 
         do {
-            if (search->delay_ticks == 0) {
+            // Task-ul este eligibil DOAR dacă nu are delay ȘI este în starea READY
+            if (search->delay_ticks == 0 && search->state==TASK_READY) {
                 current_task = search;
                 ready_lists[prio] = search; // Rotim lista pentru Round Robin
                 return;
@@ -80,7 +81,6 @@ void rtos_scheduler_next() {
         temp_mask &= ~(1u << prio);
     }
 }
-
 // ----------------------------------------------
 // PendSV_Handler pentru context switching
 // ----------------------------------------------
@@ -122,6 +122,8 @@ void rtos_task_create(void (*task_fn)(void), uint32_t priority){
     rtos_tcb_t *tcb = &tcb_pool[tcb_count];
     tcb->priority = priority;
     tcb->delay_ticks = 0;
+    tcb->state = TASK_READY;
+    tcb->wait_obj = NULL;
 
     uint32_t *stack = task_stacks[tcb_count];
     uint32_t size = RTOS_STACK_SIZE;
@@ -183,4 +185,145 @@ void rtos_delay(uint32_t ticks) {
     __asm volatile("cpsie i" : : : "memory");
 
     rtos_yield(); // Forțăm un context switch pentru a lăsa alt task să ruleze
+}
+// ----------------------------------------------
+// Semafor binar
+// ----------------------------------------------
+void rtos_sem_init(rtos_sem_t *sem, uint32_t initial_count) {
+    sem->count = initial_count; //0 sau 1 pt sem binar
+}
+void rtos_sem_wait(rtos_sem_t *sem) {
+    while(1){
+        __asm volatile("cpsid i" : : : "memory"); //logica de blocare/deblocare
+        if (sem->count > 0) {
+            sem->count--;
+            __asm volatile("cpsie i" : : : "memory");
+            return; // Am obținut semnalul, ieșim
+        } else {
+            // Blocăm task-ul 
+            current_task->state = TASK_BLOCKED_SEM;
+            current_task->wait_obj = (void*)sem;
+            __asm volatile("cpsie i" : : : "memory");
+            rtos_yield(); // Forțăm switch-ul către un alt task
+        }
+    }
+}
+void rtos_sem_signal(rtos_sem_t *sem) {
+    __asm volatile("cpsid i" : : : "memory");
+
+    sem->count++;
+
+    // Căutăm în pool un task care aștepta acest semafor specific
+    for (uint32_t i = 0; i < tcb_count; i++) {
+        if (tcb_pool[i].state == TASK_BLOCKED_SEM && tcb_pool[i].wait_obj == sem) {
+            tcb_pool[i].state = TASK_READY;
+            tcb_pool[i].wait_obj = NULL;
+            break; // Deblocăm doar primul task (FIFO-ish simplificat)
+        }
+    }
+
+    __asm volatile("cpsie i" : : : "memory");
+    rtos_yield(); //verificăm dacă task-ul deblocat are prioritate mai mare
+}
+// ----------------------------------------------
+// Mutex cu Priority Inversion
+// ----------------------------------------------
+void rtos_mutex_init(rtos_mutex_t *mutex) {
+    if (mutex == NULL) return;
+
+    mutex->lock = 0;                // Mutex-ul este liber inițial
+    mutex->owner = NULL;            // Nu aparține niciunui task
+    mutex->original_priority = 0;   // Valoare neutră
+}
+void rtos_mutex_lock(rtos_mutex_t *mutex) {
+    while (1) {
+        __asm volatile("cpsid i" : : : "memory");
+
+        if (mutex->lock == 0) {
+            // Mutex liber - îl ocupăm
+            mutex->lock = 1;
+            mutex->owner = current_task;
+            mutex->original_priority = current_task->priority;
+            __asm volatile("cpsie i" : : : "memory");
+            return;
+        } else {
+            // Mutex ocupat - verificăm Inversiunea de Prioritate
+            if (current_task->priority > mutex->owner->priority) {
+                // Ridicăm prioritatea deținătorului (Inheritance)
+                mutex->owner->priority = current_task->priority;
+                
+                // Actualizăm masca de priorități a scheduler-ului
+                top_priority_mask |= (1u << mutex->owner->priority);
+            }
+
+            current_task->state = TASK_BLOCKED_MUTEX;
+            current_task->wait_obj = (void*)mutex;
+            __asm volatile("cpsie i" : : : "memory");
+            rtos_yield();
+        }
+    }
+}
+void rtos_mutex_unlock(rtos_mutex_t *mutex) {
+    __asm volatile("cpsid i" : : : "memory");
+
+    if (mutex->owner != current_task) {
+        __asm volatile("cpsie i" : : : "memory");
+        return; // Doar proprietarul poate debloca
+    }
+
+    // Restaurăm prioritatea originală dacă a fost moștenită
+    if (current_task->priority != mutex->original_priority) {
+        // Curățăm bitul de prioritate înaltă din mască (dacă nu mai sunt alte task-uri acolo)
+        // Notă: O implementare completă ar verifica dacă mai există task-uri la acea prioritate, 
+        // dar pentru simplitate, restaurăm valoarea.
+        current_task->priority = mutex->original_priority;
+    }
+
+    mutex->lock = 0;
+    mutex->owner = NULL;
+
+    // Trezim task-urile care așteptau acest mutex
+    for (uint32_t i = 0; i < tcb_count; i++) {
+        if (tcb_pool[i].state == TASK_BLOCKED_MUTEX && tcb_pool[i].wait_obj == mutex) {
+            tcb_pool[i].state = TASK_READY;
+            tcb_pool[i].wait_obj = NULL;
+        }
+    }
+
+    __asm volatile("cpsie i" : : : "memory");
+    rtos_yield();
+}
+// ----------------------------------------------
+// Message Queue
+// ----------------------------------------------
+void rtos_queue_init(rtos_queue_t *q) {
+    q->head = 0;
+    q->tail = 0;
+    rtos_sem_init(&q->sem_free_slots, 8);
+    rtos_sem_init(&q->sem_available_msgs, 0);
+    rtos_mutex_init(&q->lock);
+}
+
+void rtos_queue_send(rtos_queue_t *q, uint32_t msg) {
+    rtos_sem_wait(&q->sem_free_slots); // Așteaptă loc liber
+    rtos_mutex_lock(&q->lock);         // Protejează buffer-ul
+    
+    q->buffer[q->head] = msg;
+    q->head = (q->head + 1) % 8;
+    
+    rtos_mutex_unlock(&q->lock);
+    rtos_sem_signal(&q->sem_available_msgs); // Anunță că există mesaj
+}
+
+uint32_t rtos_queue_receive(rtos_queue_t *q) {
+    uint32_t msg;
+    rtos_sem_wait(&q->sem_available_msgs); // Așteaptă mesaj
+    rtos_mutex_lock(&q->lock);
+    
+    msg = q->buffer[q->tail];
+    q->tail = (q->tail + 1) % 8;
+    
+    rtos_mutex_unlock(&q->lock);
+    rtos_sem_signal(&q->sem_free_slots);   // Eliberează un loc
+    return msg;
 }
