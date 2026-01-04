@@ -109,8 +109,6 @@ void PendSV_Handler(void)
         "BX lr\n"
     );
 }
-
-
 // ----------------------------------------------
 // Creare task
 // ----------------------------------------------
@@ -176,7 +174,6 @@ void rtos_yield()
 {
     SCB_ICSR = SCB_ICSR_PENDSVSET; //declansare PendSV
 }
-
 void rtos_delay(uint32_t ticks) {
     if (ticks == 0) return;
 
@@ -226,7 +223,7 @@ void rtos_sem_signal(rtos_sem_t *sem) {
     rtos_yield(); //verificăm dacă task-ul deblocat are prioritate mai mare
 }
 // ----------------------------------------------
-// Mutex cu Priority Inversion
+// Mutex cu Priority Inheritance
 // ----------------------------------------------
 void rtos_mutex_init(rtos_mutex_t *mutex) {
     if (mutex == NULL) return;
@@ -303,7 +300,6 @@ void rtos_queue_init(rtos_queue_t *q) {
     rtos_sem_init(&q->sem_available_msgs, 0);
     rtos_mutex_init(&q->lock);
 }
-
 void rtos_queue_send(rtos_queue_t *q, uint32_t msg) {
     rtos_sem_wait(&q->sem_free_slots); // Așteaptă loc liber
     rtos_mutex_lock(&q->lock);         // Protejează buffer-ul
@@ -314,7 +310,6 @@ void rtos_queue_send(rtos_queue_t *q, uint32_t msg) {
     rtos_mutex_unlock(&q->lock);
     rtos_sem_signal(&q->sem_available_msgs); // Anunță că există mesaj
 }
-
 uint32_t rtos_queue_receive(rtos_queue_t *q) {
     uint32_t msg;
     rtos_sem_wait(&q->sem_available_msgs); // Așteaptă mesaj
