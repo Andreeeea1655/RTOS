@@ -1,5 +1,11 @@
 #include "rtos.h"
 
+#define DWT_CYCCNT   (*(volatile uint32_t *)0xE0001004)
+
+// Declarații externe pentru statistici din rtos.c
+extern volatile uint32_t isr_latency_cycles;
+extern volatile uint32_t max_isr_latency_cycles;
+extern volatile uint32_t g_tick;
 extern uint32_t _estack;
 extern uint32_t _sidata;  // start init values for .data (in FLASH)
 extern uint32_t _sdata;   // start of .data in RAM
@@ -13,9 +19,14 @@ void Reset_Handler();
 void Default_Handler();
 void HardFault_Handler();
 void hardfault_c(uint32_t *sp);
-extern void SysTick_Handler();
+void SysTick_Handler();
+void MemManage_Handler();
+void BusFault_Handler();
+void UsageFault_Handler();
+void SVC_Handler(void);
 extern void PendSV_Handler();
 extern void rtos_tick_handler();
+
 
 extern int main();
 
@@ -28,11 +39,11 @@ void (* const vector_table[])(void) = {
     Reset_Handler,                // 1: Reset
     Default_Handler,              // 2: NMI
     HardFault_Handler,              // 3: HardFault
-    Default_Handler,              // 4: MemManage
-    Default_Handler,              // 5: BusFault
-    Default_Handler,              // 6: UsageFault
+    MemManage_Handler,              // 4: MemManage
+    BusFault_Handler,              // 5: BusFault
+    UsageFault_Handler,              // 6: UsageFault
     0, 0, 0, 0,                   // 7–10: rezervate
-    Default_Handler,              // 11: SVCall
+    SVC_Handler,              // 11: SVCall
     Default_Handler,              // 12: Debug monitor
     0,                            // 13: rezervat
     PendSV_Handler,              // 14: PendSV
@@ -68,8 +79,27 @@ void Reset_Handler(){
 }
 
 
-void SysTick_Handler(){
+void SysTick_Handler()
+{
+    static uint32_t last_entry = 0;
+
+    uint32_t entry = DWT_CYCCNT;
+
+    if (last_entry != 0) {
+        uint32_t expected = (CPU_CLOCK_HZ / RTOS_TICK_RATE_HZ);
+        uint32_t delta = entry - last_entry;
+
+        uint32_t jitter = (delta > expected) ? (delta - expected) : (expected - delta);
+
+        isr_latency_cycles = jitter;
+        if (jitter > max_isr_latency_cycles) max_isr_latency_cycles = jitter;
+    }
+
+    last_entry = entry;
+
     rtos_tick_handler();
+
+    // uint32_t dur = DWT_CYCCNT - entry;
 }
 
 void HardFault_Handler()
@@ -81,6 +111,44 @@ void HardFault_Handler()
         "MRSNE r0, PSP\n"
         "B hardfault_c\n"
     );
+}
+
+void MemManage_Handler()
+{
+    __asm volatile(
+        "TST lr, #4\n"
+        "ITE EQ\n"
+        "MRSEQ r0, MSP\n"
+        "MRSNE r0, PSP\n"
+        "B hardfault_c\n"
+    );
+}
+
+void BusFault_Handler()
+{
+    __asm volatile(
+        "TST lr, #4\n"
+        "ITE EQ\n"
+        "MRSEQ r0, MSP\n"
+        "MRSNE r0, PSP\n"
+        "B hardfault_c\n"
+    );
+}
+
+void UsageFault_Handler()
+{
+    __asm volatile(
+        "TST lr, #4\n"
+        "ITE EQ\n"
+        "MRSEQ r0, MSP\n"
+        "MRSNE r0, PSP\n"
+        "B hardfault_c\n"
+    );
+}
+
+void SVC_Handler(void)
+{
+    while (1) { __asm volatile("nop"); }
 }
 
 void hardfault_c(uint32_t *sp)
